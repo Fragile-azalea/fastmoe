@@ -29,6 +29,9 @@ if os.environ.get('USE_NCCL', '1') == '1':
     else:
         ext_libs.append('nccl')
 
+if os.environ.get('MOE_DEBUG', '0') == '1':
+    cxx_flags.append('-DMOE_DEBUG')
+
 if is_rocm_pytorch:
     define_macros=[('FMOE_USE_HIP', None)]
 else:
@@ -38,7 +41,7 @@ else:
 if __name__ == '__main__':
     setuptools.setup(
         name='fastmoe',
-        version='1.0.0',
+        version='1.1.0',
         description='An efficient Mixture-of-Experts system for PyTorch',
         author=', '.join(authors),
         author_email='hja20@mails.tsinghua.edu.cn',

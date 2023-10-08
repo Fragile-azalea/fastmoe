@@ -102,7 +102,7 @@ class MegatronMLP(FMoETransformerMLP):
             assert False, "Undefined balance strategy {}" % (args.balance_strategy)
 
         super().__init__(
-            args.num_experts,
+            args.fmoe_num_experts,
             top_k=args.top_k,
             d_model=args.hidden_size,
             d_hidden=args.hidden_hidden_size,
@@ -110,7 +110,7 @@ class MegatronMLP(FMoETransformerMLP):
             moe_group=moe_group,
             expert_dp_comm="none" if args.distributed_experts else "dp",
             gate_hook=generate_megatron_gate_hook(
-                layer_idx, args.num_experts * world_size
+                layer_idx, args.fmoe_num_experts * world_size
             ),
             gate=gate,
         )
@@ -130,9 +130,20 @@ class MegatronMLP(FMoETransformerMLP):
         additional numpy rng is used.
         """
         rng = np.random.default_rng(np.random.randint(2048) + self.rank)
-        _megatron_init_method(self.experts.htoh4, rng, self.sigma)
+        
+        if type(self.experts) is nn.ModuleList:
+            for expert in self.experts:
+                _megatron_init_method(expert.htoh4, rng, self.sigma)
+        else:
+            _megatron_init_method(self.experts.htoh4, rng, self.sigma)
+        
         std = self.sigma / math.sqrt(2.0 * self.num_layers)
-        _megatron_init_method(self.experts.h4toh, rng, std)
+        
+        if type(self.experts) is nn.ModuleList:
+            for expert in self.experts:
+                _megatron_init_method(expert.h4toh, rng, std)
+        else:
+            _megatron_init_method(self.experts.h4toh, rng, std)
 
     def forward(self, inp):
         from megatron import mpu
@@ -146,11 +157,12 @@ class MegatronMLP(FMoETransformerMLP):
 
 def fmoefy(
     model,
-    num_experts=None,
+    fmoe_num_experts=None,
     distributed_experts=True,
     hidden_hidden_size=None,
     top_k=None,
     gate=None,
+    megatron_version=None
 ):
     r"""
     Replace MLP layers in a transformer-based model in Megatron by MoE.
@@ -171,11 +183,11 @@ def fmoefy(
     if distributed_experts is not None:
         args.distributed_experts = distributed_experts
 
-    if num_experts is not None:
-        args.num_experts = num_experts
+    if fmoe_num_experts is not None:
+        args.fmoe_num_experts = fmoe_num_experts
     assert (
-        "num_experts" in args
-    ), "num_experts should be specified in arguments or fmoefy function"
+        "fmoe_num_experts" in args
+    ), "fmoe_num_experts should be specified in arguments or fmoefy function"
 
     if top_k is not None:
         args.top_k = top_k
@@ -184,11 +196,29 @@ def fmoefy(
 
     args.hidden_hidden_size = hidden_hidden_size
 
-    for idx, l in enumerate(model.language_model.transformer.layers):
-        l.mlp = MegatronMLP(args, idx, gate=gate)
+    if megatron_version == "v2.2":
 
-    # initialize gate hook
-    num_layers = len(model.language_model.transformer.layers)
+        for idx, l in enumerate(model.language_model.transformer.layers):
+            l.mlp = MegatronMLP(args, idx, gate=gate)
+
+        # initialize gate hook
+        num_layers = len(model.language_model.transformer.layers)
+    elif megatron_version in ["v2.5", "v3.0.2"]:
+        
+        for idx, l in enumerate(model.language_model.encoder.layers):
+            l.mlp = MegatronMLP(args, idx, gate=gate)
+        if hasattr(model.language_model, "decoder") and model.language_model.decoder is not None:
+            for idx, l in enumerate(model.language_model.decoder.layers):
+                l.mlp = MegatronMLP(args, idx, gate=gate)
+
+        # initialize gate hook
+        num_layers = len(model.language_model.encoder.layers)
+        if hasattr(model.language_model, "decoder") and model.language_model.decoder is not None:
+            num_layers += len(model.language_model.decoder.layers)
+    else:
+        print(model.language_model)
+        assert False, f"megatron_version {megatron_version} not known."
+
     reset_gate_hook(num_layers)
 
     return model
